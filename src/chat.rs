@@ -96,8 +96,12 @@ impl Handler<NewUser> for Chat {
     type Result = ActorResponse<Self, (), anyhow::Error>;
 
     fn handle(&mut self, msg: NewUser, _: &mut Context<Self>) -> Self::Result {
-        println!("New user appeared: {}", &msg.user);
+        // Filter our own occurrences.
+        if msg.user == self.me {
+            return ActorResponse::reply(Ok(()));
+        }
 
+        println!("New user appeared: {}", &msg.user);
         self.users.push(UserDesc {
             name: msg.user,
             node_id: msg.address,
