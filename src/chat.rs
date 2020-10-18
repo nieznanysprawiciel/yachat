@@ -9,9 +9,33 @@ use crate::Args;
 
 use chrono::Local;
 
+// =========================================== //
+// Public exposed messages
+// =========================================== //
+
+#[derive(Message)]
+#[rtype(result = "anyhow::Result<()>")]
+pub struct NewUser {
+    pub user: String,
+    pub address: String,
+    pub group: String,
+}
+
+// =========================================== //
+// Chat implementation
+// =========================================== //
+
+#[derive(Clone)]
+struct UserDesc {
+    name: String,
+    node_id: String,
+}
+
 pub struct Chat {
     me: String,
     group: String,
+
+    users: Vec<UserDesc>,
 
     discovery: Addr<Discovery>,
 }
@@ -20,14 +44,16 @@ impl Actor for Chat {
     type Context = Context<Self>;
 
     fn started(&mut self, ctx: &mut Self::Context) {
-        actix_rpc::bind::<SendText>(&format!("/public/yachat/"), ctx.address().recipient());
+        actix_rpc::bind::<SendText>(&format!("/public/yachat"), ctx.address().recipient());
         log::info!("Chat started as user: {}", &self.me);
 
         let msg = InitChatGroup {
             me: self.me.clone(),
             group: self.group.clone(),
+            notify: ctx.address().recipient(),
         };
         self.discovery.do_send(msg);
+        println!("yachat\nVersion 0.1")
     }
 
     fn stopped(&mut self, _: &mut Self::Context) {
@@ -42,6 +68,7 @@ impl Chat {
         Ok(Chat {
             me: args.name,
             group: args.group,
+            users: vec![],
             discovery,
         })
     }
@@ -61,6 +88,20 @@ impl Handler<RpcEnvelope<SendText>> for Chat {
                 &text.content
             );
         }
+        ActorResponse::reply(Ok(()))
+    }
+}
+
+impl Handler<NewUser> for Chat {
+    type Result = ActorResponse<Self, (), anyhow::Error>;
+
+    fn handle(&mut self, msg: NewUser, _: &mut Context<Self>) -> Self::Result {
+        println!("New user appeared: {}", &msg.user);
+
+        self.users.push(UserDesc {
+            name: msg.user,
+            node_id: msg.address,
+        });
         ActorResponse::reply(Ok(()))
     }
 }
