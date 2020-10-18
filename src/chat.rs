@@ -1,13 +1,19 @@
 use actix::prelude::*;
 use actix::Actor;
 
-use ya_service_bus::{actix_rpc, RpcEndpoint, RpcEnvelope, RpcMessage};
+use ya_service_bus::{actix_rpc, RpcEnvelope};
 
-use crate::messages::{ChatError, SendText};
+use crate::discover::{Discovery, InitChatGroup};
+use crate::protocol::{ChatError, SendText};
+use crate::Args;
+
 use chrono::Local;
 
 pub struct Chat {
     me: String,
+    group: String,
+
+    discovery: Addr<Discovery>,
 }
 
 impl Actor for Chat {
@@ -16,6 +22,12 @@ impl Actor for Chat {
     fn started(&mut self, ctx: &mut Self::Context) {
         actix_rpc::bind::<SendText>(&format!("/public/yachat/"), ctx.address().recipient());
         log::info!("Chat started as user: {}", &self.me);
+
+        let msg = InitChatGroup {
+            me: self.me.clone(),
+            group: self.group.clone(),
+        };
+        self.discovery.do_send(msg);
     }
 
     fn stopped(&mut self, _: &mut Self::Context) {
@@ -24,8 +36,14 @@ impl Actor for Chat {
 }
 
 impl Chat {
-    pub fn new(me: String) -> Chat {
-        Chat { me }
+    pub fn new(args: Args) -> Result<Chat, anyhow::Error> {
+        let discovery = Discovery::new(args.api)?.start();
+
+        Ok(Chat {
+            me: args.name,
+            group: args.group,
+            discovery,
+        })
     }
 }
 
