@@ -3,7 +3,7 @@ use actix::Actor;
 
 use ya_service_bus::{actix_rpc, RpcEnvelope};
 
-use crate::discover::{Discovery, InitChatGroup};
+use crate::discover::{Discovery, InitChatGroup, Shutdown};
 use crate::protocol::{ChatError, SendText};
 use crate::Args;
 
@@ -107,5 +107,14 @@ impl Handler<NewUser> for Chat {
             node_id: msg.address,
         });
         ActorResponse::reply(Ok(()))
+    }
+}
+
+impl Handler<Shutdown> for Chat {
+    type Result = ActorResponse<Self, (), anyhow::Error>;
+
+    fn handle(&mut self, _: Shutdown, _: &mut Context<Self>) -> Self::Result {
+        let discovery = self.discovery.clone();
+        ActorResponse::r#async(async move { discovery.send(Shutdown {}).await? }.into_actor(self))
     }
 }

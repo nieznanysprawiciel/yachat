@@ -26,6 +26,10 @@ pub struct InitChatGroup {
 #[rtype(result = "Result<(), ()>")]
 pub struct DiscoverUsers;
 
+#[derive(Message)]
+#[rtype(result = "Result<(), anyhow::Error>")]
+pub struct Shutdown;
+
 // =========================================== //
 // Discovery implementation
 // =========================================== //
@@ -45,7 +49,8 @@ struct GroupSubscription {
 
 pub struct Discovery {
     apis: Apis,
-    subscriptions: Vec<GroupSubscription>,
+    listeners: Vec<GroupSubscription>,
+    subscriptions: Vec<String>,
 }
 
 impl Discovery {
@@ -57,6 +62,7 @@ impl Discovery {
 
         Ok(Discovery {
             apis,
+            listeners: vec![],
             subscriptions: vec![],
         })
     }
@@ -74,18 +80,20 @@ impl Handler<InitChatGroup> for Discovery {
 
         let apis = self.apis.clone();
         let future = async move {
-            let _ = apis.provider.market.subscribe(&offer).await?;
-            Ok(apis.requestor.market.subscribe(&demand).await?)
+            let subscription = apis.provider.market.subscribe(&offer).await?;
+            let listener = apis.requestor.market.subscribe(&demand).await?;
+            Ok((listener, subscription))
         }
         .into_actor(self)
         .map(
-            move |result: anyhow::Result<String>, myself, _| match result {
-                Ok(subscription) => {
-                    myself.subscriptions.push(GroupSubscription {
-                        subscription,
+            move |result: anyhow::Result<(String, String)>, myself, _| match result {
+                Ok((listener, subscription)) => {
+                    myself.listeners.push(GroupSubscription {
+                        subscription: listener,
                         group: msg.group,
                         notify: msg.notify,
                     });
+                    myself.subscriptions.push(subscription);
                     Ok(())
                 }
                 Err(e) => {
@@ -107,7 +115,7 @@ impl Handler<DiscoverUsers> for Discovery {
     type Result = ActorResponse<Self, (), ()>;
 
     fn handle(&mut self, _: DiscoverUsers, ctx: &mut Context<Self>) -> Self::Result {
-        let subs = self.subscriptions.clone();
+        let subs = self.listeners.clone();
         let apis = self.apis.clone();
         let myself = ctx.address();
 
@@ -116,7 +124,7 @@ impl Handler<DiscoverUsers> for Discovery {
                 let events = match apis
                     .requestor
                     .market
-                    .collect(&sub.subscription, Some(4.0), Some(20))
+                    .collect(&sub.subscription, Some(10.0), Some(20))
                     .await
                 {
                     Ok(events) => events,
@@ -126,6 +134,8 @@ impl Handler<DiscoverUsers> for Discovery {
                         continue;
                     }
                 };
+
+                log::debug!("Got {} events.", events.len());
 
                 for event in events.into_iter() {
                     if let Err(e) = async move {
@@ -169,6 +179,44 @@ impl Handler<DiscoverUsers> for Discovery {
             Ok(())
         };
         ActorResponse::r#async(future.into_actor(self))
+    }
+}
+
+impl Handler<Shutdown> for Discovery {
+    type Result = ActorResponse<Self, (), anyhow::Error>;
+
+    fn handle(&mut self, _: Shutdown, _: &mut Context<Self>) -> Self::Result {
+        let subs: Vec<_> = self.subscriptions.drain(..).collect();
+        let listeners = self
+            .listeners
+            .drain(..)
+            .map(|group| group.subscription)
+            .collect::<Vec<String>>();
+        let apis = self.apis.clone();
+        let future = async move {
+            for sub in subs.into_iter() {
+                log::info!("Unsubscribing {}", &sub);
+                apis.provider
+                    .market
+                    .unsubscribe(&sub)
+                    .await
+                    .map_err(|e| log::error!("Failed to unsubscribe: {}. Error: {}", sub, e))
+                    .ok();
+            }
+            for sub in listeners.into_iter() {
+                log::info!("Unsubscribing {}", &sub);
+                apis.requestor
+                    .market
+                    .unsubscribe(&sub)
+                    .await
+                    .map_err(|e| log::error!("Failed to unsubscribe: {}. Error: {}", sub, e))
+                    .ok();
+            }
+            log::info!("Finished cleanups.");
+        }
+        .into_actor(self);
+
+        ActorResponse::r#async(future.map(|_, _, _| Ok(())))
     }
 }
 

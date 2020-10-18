@@ -1,7 +1,9 @@
-use actix::{Actor, System};
+use actix::Actor;
 use structopt::{clap, StructOpt};
+use tokio::signal;
 
 use chat::Chat;
+use discover::Shutdown;
 
 use ya_client::cli::ApiOpts;
 
@@ -20,7 +22,8 @@ pub struct Args {
     pub api: ApiOpts,
 }
 
-fn main() -> Result<(), anyhow::Error> {
+#[actix_rt::main]
+async fn main() -> Result<(), anyhow::Error> {
     dotenv::dotenv().ok();
     flexi_logger::Logger::with_env()
         .log_to_file()
@@ -31,15 +34,12 @@ fn main() -> Result<(), anyhow::Error> {
     let args = Args::from_args();
     log::info!("Starting ya-chat.");
 
-    let sys = System::new("ya-chat");
+    let chat = Chat::new(args)?.start();
 
-    Chat::new(args)?.start();
+    signal::ctrl_c().await.unwrap();
 
-    match sys.run() {
-        Err(e) => {
-            log::error!("Finished with error: {}", e);
-            std::process::exit(1)
-        }
-        Ok(_) => std::process::exit(0),
-    }
+    println!("Shutting down. Wait for cleanup...");
+    chat.send(Shutdown {}).await??;
+    println!("Finished.");
+    Ok(())
 }

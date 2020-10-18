@@ -2205,6 +2205,8 @@ name = "yachat"
 version = "0.1.0"
 dependencies = [
  "actix",
+ "actix-rt",
+ "actix_derive",
  "anyhow",
  "chrono",
  "dotenv",
