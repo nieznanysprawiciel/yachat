@@ -1,14 +1,16 @@
 use actix::prelude::*;
 use anyhow::bail;
 use std::convert::TryFrom;
+use std::str::FromStr;
 
+use ya_agreement_utils::agreement::expand;
 use ya_agreement_utils::{constraints, AgreementView, ConstraintKey, Constraints};
 use ya_client::cli::ApiOpts;
 use ya_client::cli::{ProviderApi, RequestorApi};
 use ya_client::model::market::{Demand, Offer, RequestorEvent};
+use ya_client::model::NodeId;
 
 use crate::chat::NewUser;
-use ya_agreement_utils::agreement::expand;
 
 // =========================================== //
 // Public exposed messages
@@ -156,7 +158,7 @@ impl Handler<DiscoverUsers> for Discovery {
 
                         let msg = NewUser {
                             group: sub.group.clone(),
-                            address: node_id.to_string(),
+                            address: NodeId::from_str(&node_id)?,
                             user: proposal_view.pointer_typed("/yachat/talk/me")?,
                         };
 

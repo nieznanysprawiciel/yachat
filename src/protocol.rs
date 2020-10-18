@@ -7,6 +7,10 @@ use ya_service_bus::RpcMessage;
 pub enum ChatError {
     #[error("Text Message Rejected")]
     Rejected,
+    #[error("Unknown user.")]
+    UnknownUser,
+    #[error("NodeId is invalid. Wrong format.")]
+    InvalidNodeId,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
