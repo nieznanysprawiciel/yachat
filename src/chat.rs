@@ -13,6 +13,7 @@ use ya_service_bus::{typed as bus, RpcEndpoint};
 use crate::discover::{Discovery, InitChatGroup, Shutdown};
 use crate::protocol::{ChatError, SendText, TextMessage};
 use crate::Args;
+use std::collections::HashMap;
 
 // =========================================== //
 // Public exposed messages
@@ -30,6 +31,13 @@ pub struct NewUser {
 #[rtype(result = "anyhow::Result<()>")]
 pub struct NewLine(pub String);
 
+#[derive(Message)]
+#[rtype(result = "anyhow::Result<()>")]
+pub struct DeliverLater {
+    pub address: NodeId,
+    pub messages: SendText,
+}
+
 // =========================================== //
 // Chat implementation
 // =========================================== //
@@ -45,6 +53,7 @@ pub struct Chat {
     group: String,
 
     users: Vec<UserDesc>,
+    delivery: HashMap<NodeId, SendText>,
 
     discovery: Addr<Discovery>,
 }
@@ -82,6 +91,7 @@ impl Chat {
             group: args.group,
             users: vec![],
             discovery,
+            delivery: HashMap::new(),
         })
     }
 }
@@ -94,17 +104,22 @@ impl Handler<RpcEnvelope<SendText>> for Chat {
             Ok(caller) => caller,
             Err(_) => return ActorResponse::reply(Err(ChatError::InvalidNodeId)),
         };
-        let sends = msg.into_inner();
 
         let user = match self.users.iter().find(|desc| desc.node_id == caller) {
             Some(desc) => desc.name.clone(),
-            None => return ActorResponse::reply(Err(ChatError::UnknownUser)),
+            None => {
+                log::warn!("Got messages from unknown user: {}", caller);
+                msg.user.clone()
+            }
         };
 
+        let sends = msg.into_inner();
         for text in sends.messages {
             println!(
                 "{} {} > {}",
-                text.timestamp.with_timezone(&Local),
+                text.timestamp
+                    .with_timezone(&Local)
+                    .format("%Y-%m-%d %H:%M:%S"),
                 &user,
                 &text.content
             );
@@ -116,7 +131,7 @@ impl Handler<RpcEnvelope<SendText>> for Chat {
 impl Handler<NewUser> for Chat {
     type Result = ActorResponse<Self, (), anyhow::Error>;
 
-    fn handle(&mut self, msg: NewUser, _: &mut Context<Self>) -> Self::Result {
+    fn handle(&mut self, msg: NewUser, ctx: &mut Context<Self>) -> Self::Result {
         match (|| -> anyhow::Result<()> {
             // Filter our own occurrences.
             if msg.user == self.me {
@@ -124,11 +139,47 @@ impl Handler<NewUser> for Chat {
                 return Ok(());
             }
 
-            println!("New user appeared: {}", &msg.user);
-            self.users.push(UserDesc {
-                name: msg.user,
-                node_id: msg.address,
-            });
+            match self
+                .users
+                .iter()
+                .find(|desc| desc.node_id == msg.address)
+                .map(|desc| desc.clone())
+            {
+                Some(returning_user) => {
+                    println!("<===> User reappeared: {} <===>", &returning_user.name);
+
+                    if let Some(messages) = self.delivery.remove(&returning_user.node_id) {
+                        log::info!(
+                            "Resending old messages to {} [{}].",
+                            &returning_user.name,
+                            &returning_user.node_id
+                        );
+
+                        let myself = ctx.address();
+                        let resend = async move {
+                            send_text(myself, &returning_user.node_id, &messages)
+                                .await
+                                .map_err(|e| {
+                                    log::error!(
+                                        "Error delivering messages to {} [{}]. Error: {}",
+                                        returning_user.name,
+                                        returning_user.node_id,
+                                        e
+                                    )
+                                })
+                                .ok();
+                        };
+                        Arbiter::spawn(resend);
+                    }
+                }
+                None => {
+                    println!("<===> New user appeared: {} <===>", &msg.user);
+                    self.users.push(UserDesc {
+                        name: msg.user,
+                        node_id: msg.address,
+                    });
+                }
+            }
             Ok(())
         })() {
             Ok(()) => ActorResponse::reply(Ok(())),
@@ -137,26 +188,60 @@ impl Handler<NewUser> for Chat {
     }
 }
 
+pub async fn send_text(chat: Addr<Chat>, addr: &NodeId, text: &SendText) -> anyhow::Result<()> {
+    if let Err(_) = bus::service(format!("/net/{}/yachat", addr))
+        .send(text.clone())
+        .await
+    {
+        let msg = DeliverLater {
+            address: addr.clone(),
+            messages: text.clone(),
+        };
+        chat.send(msg).await??;
+    }
+    Ok(())
+}
+
 impl Handler<NewLine> for Chat {
     type Result = ActorResponse<Self, (), anyhow::Error>;
 
-    fn handle(&mut self, line: NewLine, _: &mut Context<Self>) -> Self::Result {
+    fn handle(&mut self, line: NewLine, ctx: &mut Context<Self>) -> Self::Result {
         let addresses: Vec<NodeId> = self.users.iter().map(|desc| desc.node_id.clone()).collect();
+        let myself = ctx.address();
+        let user_me = self.me.clone();
+
         let future = async move {
             let text = SendText {
+                user: user_me,
                 messages: vec![TextMessage {
                     content: line.0,
                     timestamp: Utc::now(),
                 }],
             };
             for addr in addresses.iter() {
-                bus::service(format!("/net/{}/yachat", addr))
-                    .send(text.clone())
-                    .await??;
+                send_text(myself.clone(), addr, &text).await?;
             }
             Ok(())
         };
         ActorResponse::r#async(future.into_actor(self))
+    }
+}
+
+impl Handler<DeliverLater> for Chat {
+    type Result = ActorResponse<Self, (), anyhow::Error>;
+
+    fn handle(&mut self, msg: DeliverLater, _: &mut Context<Self>) -> Self::Result {
+        log::info!("Messages scheduled to deliver later to [{}].", &msg.address);
+
+        self.delivery
+            .entry(msg.address.clone())
+            .or_insert(SendText {
+                messages: vec![],
+                user: self.me.clone(),
+            })
+            .messages
+            .extend(msg.messages.messages.into_iter());
+        ActorResponse::reply(Ok(()))
     }
 }
 

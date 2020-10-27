@@ -24,6 +24,7 @@ pub struct TextMessage {
 #[serde(rename_all = "camelCase")]
 pub struct SendText {
     pub messages: Vec<TextMessage>,
+    pub user: String,
 }
 
 impl RpcMessage for SendText {
